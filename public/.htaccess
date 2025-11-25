@@ -1,0 +1,13 @@
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Si le chemin correspond à un fichier ou dossier physique, ne pas réécrire
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+
+    # Tout le reste -> index.php (Slim gère le routing)
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
+
+# Facultatif: assurer l’index par défaut
+DirectoryIndex index.php
