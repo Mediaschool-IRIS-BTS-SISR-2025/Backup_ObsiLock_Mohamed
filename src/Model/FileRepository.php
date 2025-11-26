@@ -1,6 +1,5 @@
 <?php
 namespace App\Model;
-
 use Medoo\Medoo;
 
 class FileRepository
@@ -12,9 +11,13 @@ class FileRepository
         $this->db = $db;
     }
 
-    public function listFiles(): array
+    public function listByUser(int $userId, ?int $folderId = null): array
     {
-        return $this->db->select('files', '*');
+        $where = ['user_id' => $userId];
+        if ($folderId !== null) {
+            $where['folder_id'] = $folderId;
+        }
+        return $this->db->select('files', '*', $where);
     }
 
     public function find(int $id): ?array
@@ -33,13 +36,8 @@ class FileRepository
         $this->db->delete('files', ['id' => $id]);
     }
 
-    public function totalSize(): int
+    public function totalSize(int $userId): int
     {
-        return (int)$this->db->sum('files', 'size') ?: 0;
-    }
-
-    public function quotaBytes(): int
-    {
-        return (int)$this->db->get('settings', 'value', ['name' => 'quota_bytes']);
+        return (int)$this->db->sum('files', 'size', ['user_id' => $userId]) ?: 0;
     }
 }

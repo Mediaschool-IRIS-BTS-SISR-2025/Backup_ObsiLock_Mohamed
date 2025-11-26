@@ -1,22 +1,33 @@
-
-
-# construction de l'image PHP/Apache une fois (extensions, docroot et mod_rewrite activé)
-
 FROM php:8.2-apache
 
-# Extensions PHP
+# Activer mod_rewrite pour Apache
+RUN a2enmod rewrite
+
+# Installer les extensions PHP nécessaires
 RUN docker-php-ext-install pdo pdo_mysql
 
-# Outils utiles pour Composer
-RUN apt-get update && apt-get install -y git zip unzip && rm -rf /var/lib/apt/lists/*
+# Configurer le DocumentRoot vers /var/www/html/public
+ENV APACHE_DOCUMENT_ROOT /var/www/html/public
 
-# Apache: activer mod_rewrite et pointer vers/public
-RUN a2enmod rewrite
-ENV APACHE_DOCUMENT_ROOT=/var/www/html/public
-RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf \
-    && sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/sites-available/*.conf
+RUN sed -ri -e 's!/var/www/html!${APACHE_DOCUMENT_ROOT}!g' /etc/apache2/apache2.conf /etc/apache2/conf-available/*.conf
 
-# Composer (binaire)
-COPY --from=composer:2 /usr/bin/composer /usr/bin/composer 
+# Copier le projet dans le conteneur
+COPY . /var/www/html
 
+# Définir les permissions
+RUN chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html
+
+# Installer Composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Installer les dépendances PHP
 WORKDIR /var/www/html
+RUN composer install --no-dev --optimize-autoloader
+
+# Exposer le port 80
+EXPOSE 80
+
+# Démarrer Apache
+CMD ["apache2-foreground"]

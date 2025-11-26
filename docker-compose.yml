@@ -1,64 +1,67 @@
+version: '3.8'
 
 services:
-  web:
+  # Base de données MySQL
+  db:
+    image: mysql:8.0
+    container_name: obsilock_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: coffre_fort
+      MYSQL_USER: obsilock_user
+      MYSQL_PASSWORD: obsilock_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - obsilock_network
+
+  # phpMyAdmin
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: obsilock_phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: db
+      PMA_PORT: 3306
+      PMA_USER: root
+      PMA_PASSWORD: root
+    ports:
+      - "8080:80"
+    depends_on:
+      - db
+    networks:
+      - obsilock_network
+
+  # API PHP
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: obsilock-web
-    ports:
-      - "8080:80"
+    container_name: obsilock_api
+    restart: unless-stopped
     volumes:
-      - ./:/var/www/html     # Monte le code complet
-      - /var/www/html/vendor # Empêche d'écraser vendor du container
-    environment:
-      DB_HOST: mysql
-      DB_NAME: ${DB_NAME}
-      DB_USER: ${DB_USER}
-      DB_PASSWORD: ${DB_PASSWORD}
-    depends_on:
-      - mysql
-    networks:
-      - obsilock-network
-
-  mysql:
-    image: mysql:8.0
-    container_name: obsilock-db
+      - ./:/var/www/html
     ports:
-      - "3306:3306"
-    environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${DB_USER}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
-      TZ: Europe/Paris
-    command: >
-      --default-authentication-plugin=mysql_native_password
-      --character-set-server=utf8mb4
-      --collation-server=utf8mb4_unicode_ci
-    volumes:
-      - mysql-data:/var/lib/mysql
-      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
-    networks:
-      - obsilock-network
-
-  phpmyadmin:
-    image: phpmyadmin:latest
-    container_name: obsilock-phpmyadmin
-    ports:
-      - "8081:80"
-    environment:
-      PMA_HOST: mysql
-      PMA_PORT: 3306
-      PMA_USER: ${DB_USER}
-      PMA_PASSWORD: ${DB_PASSWORD}
+      - "8888:80"
     depends_on:
-      - mysql
+      - db
+    environment:
+      DB_HOST: db
+      DB_NAME: coffre_fort
+      DB_USER: obsilock_user
+      DB_PASS: obsilock_pass
+      JWT_SECRET: mon_secret_super_securise_change_moi_32_caracteres_minimum
     networks:
-      - obsilock-network
+      - obsilock_network
 
 volumes:
-  mysql-data:
+  db_data:
+    driver: local
 
 networks:
-  obsilock-network:
+  obsilock_network:
     driver: bridge

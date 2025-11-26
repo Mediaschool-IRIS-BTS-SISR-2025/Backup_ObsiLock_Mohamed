@@ -1,74 +1,58 @@
 <?php
-// src/Controller/FileController.php
-
 namespace App\Controller;
 
 use App\Model\FileRepository;
-use Medoo\Medoo;
+use App\Model\UserRepository;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
 class FileController
 {
     private FileRepository $files;
+    private UserRepository $users;
     private string $uploadDir;
 
-    public function __construct(Medoo $db)
+    public function __construct(FileRepository $files, UserRepository $users, string $uploadDir)
     {
-        $this->files = new FileRepository($db);
-        $this->uploadDir = __DIR__ . '/../../storage/uploads';
+        $this->files = $files;
+        $this->users = $users;
+        $this->uploadDir = $uploadDir;
     }
 
     // GET /files
     public function list(Request $request, Response $response): Response
     {
-        $data = $this->files->listFiles();
+        $user = $request->getAttribute('user');
+        $data = $this->files->listByUser($user['user_id']);
 
-        $payload = json_encode($data, JSON_PRETTY_PRINT);
-        $response->getBody()->write($payload);
-        return $response
-            ->withHeader('Content-Type', 'application/json')
-            ->withStatus(200);
+        $response->getBody()->write(json_encode($data));
+        return $response->withHeader('Content-Type', 'application/json');
     }
 
-    // GET /files/{id}
-    public function show(Request $request, Response $response, array $args): Response
-    {
-        $id = (int)$args['id'];
-        $file = $this->files->find($id);
-
-        if (!$file) {
-            $response->getBody()->write(json_encode(['error' => 'File not found']));
-            return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
-        }
-
-        $response->getBody()->write(json_encode($file, JSON_PRETTY_PRINT));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
-    }
-
-    // POST /files  (upload via form-data)
+    // POST /files (upload)
     public function upload(Request $request, Response $response): Response
     {
+        $user = $request->getAttribute('user');
         $uploadedFiles = $request->getUploadedFiles();
 
         if (!isset($uploadedFiles['file'])) {
-            $response->getBody()->write(json_encode(['error' => 'No file uploaded']));
+            $response->getBody()->write(json_encode(['error' => 'Aucun fichier']));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
 
         $file = $uploadedFiles['file'];
 
         if ($file->getError() !== UPLOAD_ERR_OK) {
-            $response->getBody()->write(json_encode(['error' => 'Upload error']));
+            $response->getBody()->write(json_encode(['error' => 'Erreur upload']));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
 
         $size = $file->getSize();
-        $totalSize = $this->files->totalSize();
-        $quota = $this->files->quotaBytes();
+        $userInfo = $this->users->find($user['user_id']);
 
-        if ($quota > 0 && ($totalSize + $size) > $quota) {
-            $response->getBody()->write(json_encode(['error' => 'Quota exceeded']));
+        // Vérifier quota
+        if (($userInfo['quota_used'] + $size) > $userInfo['quota_total']) {
+            $response->getBody()->write(json_encode(['error' => 'Quota dépassé']));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(413);
         }
 
@@ -76,39 +60,61 @@ class FileController
         $mimeType = $file->getClientMediaType();
         $storedName = uniqid('f_', true) . '_' . $originalName;
 
+        // Sauvegarder le fichier
         $file->moveTo($this->uploadDir . DIRECTORY_SEPARATOR . $storedName);
 
-        $id = $this->files->create([
-            'filename'    => $originalName,
+        // Créer l'entrée en BDD
+        $fileId = $this->files->create([
+            'user_id' => $user['user_id'],
+            'folder_id' => null,
+            'filename' => $originalName,
             'stored_name' => $storedName,
-            'size'        => $size,
-            'mime_type'   => $mimeType,
-            'uploaded_at' => date('Y-m-d H:i:s')
+            'size' => $size,
+            'mime_type' => $mimeType
         ]);
 
-        $response->getBody()->write(json_encode([
-            'message' => 'File uploaded',
-            'id'      => $id
-        ], JSON_PRETTY_PRINT));
+        // Mettre à jour le quota
+        $this->users->updateQuota($user['user_id'], $userInfo['quota_used'] + $size);
 
+        $response->getBody()->write(json_encode([
+            'message' => 'Fichier uploadé',
+            'id' => $fileId
+        ]));
         return $response->withHeader('Content-Type', 'application/json')->withStatus(201);
+    }
+
+    // GET /files/{id}
+    public function show(Request $request, Response $response, array $args): Response
+    {
+        $user = $request->getAttribute('user');
+        $fileId = (int)$args['id'];
+        $file = $this->files->find($fileId);
+
+        if (!$file || $file['user_id'] !== $user['user_id']) {
+            $response->getBody()->write(json_encode(['error' => 'Fichier introuvable']));
+            return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
+        }
+
+        $response->getBody()->write(json_encode($file));
+        return $response->withHeader('Content-Type', 'application/json');
     }
 
     // GET /files/{id}/download
     public function download(Request $request, Response $response, array $args): Response
     {
-        $id = (int)$args['id'];
-        $file = $this->files->find($id);
+        $user = $request->getAttribute('user');
+        $fileId = (int)$args['id'];
+        $file = $this->files->find($fileId);
 
-        if (!$file) {
-            $response->getBody()->write('File not found');
+        if (!$file || $file['user_id'] !== $user['user_id']) {
+            $response->getBody()->write('Fichier introuvable');
             return $response->withStatus(404);
         }
 
         $path = $this->uploadDir . DIRECTORY_SEPARATOR . $file['stored_name'];
 
         if (!file_exists($path)) {
-            $response->getBody()->write('File missing on disk');
+            $response->getBody()->write('Fichier manquant');
             return $response->withStatus(500);
         }
 
@@ -118,50 +124,49 @@ class FileController
 
         return $response
             ->withHeader('Content-Type', $file['mime_type'])
-            ->withHeader('Content-Disposition', 'attachment; filename="' . $file['filename'] . '"')
-            ->withStatus(200);
+            ->withHeader('Content-Disposition', 'attachment; filename="' . $file['filename'] . '"');
     }
 
     // DELETE /files/{id}
     public function delete(Request $request, Response $response, array $args): Response
     {
-        $id = (int)$args['id'];
-        $file = $this->files->find($id);
+        $user = $request->getAttribute('user');
+        $fileId = (int)$args['id'];
+        $file = $this->files->find($fileId);
 
-        if (!$file) {
-            $response->getBody()->write(json_encode(['error' => 'File not found']));
+        if (!$file || $file['user_id'] !== $user['user_id']) {
+            $response->getBody()->write(json_encode(['error' => 'Fichier introuvable']));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
         }
 
-        // Supprimer le fichier sur le disque
+        // Supprimer le fichier physique
         $path = $this->uploadDir . DIRECTORY_SEPARATOR . $file['stored_name'];
         if (file_exists($path)) {
             unlink($path);
         }
 
-        // Supprimer en base
-        $this->files->delete($id);
+        // Supprimer de la BDD
+        $this->files->delete($fileId);
 
-        $response->getBody()->write(json_encode(['message' => 'File deleted']));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+        // Mettre à jour le quota
+        $userInfo = $this->users->find($user['user_id']);
+        $this->users->updateQuota($user['user_id'], $userInfo['quota_used'] - $file['size']);
+
+        $response->getBody()->write(json_encode(['message' => 'Fichier supprimé']));
+        return $response->withHeader('Content-Type', 'application/json');
     }
 
     // GET /stats
     public function stats(Request $request, Response $response): Response
     {
-        $totalSize = $this->files->totalSize();
-        $quota = $this->files->quotaBytes();
+        $user = $request->getAttribute('user');
+        $userInfo = $this->users->find($user['user_id']);
 
-        // Exercice 1: utiliser countFiles() ici si l'étudiant l’a codée
-        // $count = $this->files->countFiles();
-
-        $data = [
-            'total_size_bytes' => $totalSize,
-            'quota_bytes'      => $quota,
-            // 'file_count'        => $count,
-        ];
-
-        $response->getBody()->write(json_encode($data, JSON_PRETTY_PRINT));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+        $response->getBody()->write(json_encode([
+            'quota_total' => $userInfo['quota_total'],
+            'quota_used' => $userInfo['quota_used'],
+            'quota_remaining' => $userInfo['quota_total'] - $userInfo['quota_used']
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
     }
 }
