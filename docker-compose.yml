@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Base de données MySQL
   db:
@@ -21,7 +19,7 @@ services:
 
   # phpMyAdmin
   phpmyadmin:
-    image: phpmyadmin/phpmyadmin:latest
+    image: phpmyadmin/phpmyadmin:5.2.1
     container_name: obsilock_phpmyadmin
     restart: unless-stopped
     environment:
@@ -29,6 +27,7 @@ services:
       PMA_PORT: 3306
       PMA_USER: root
       PMA_PASSWORD: root
+    # user: 1000:1000
     ports:
       - "8080:80"
     depends_on:
