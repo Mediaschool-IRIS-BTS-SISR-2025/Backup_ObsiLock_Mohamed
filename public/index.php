@@ -43,7 +43,7 @@ $fileRepo = new FileRepository($database);
 // Controllers
 $authController = new AuthController($userRepo, $jwtSecret);
 $folderController = new FolderController($folderRepo);
-$fileController = new FileController($fileRepo, $userRepo, $uploadDir);
+$fileController = new FileController($fileRepo, $userRepo, $uploadDir, $database); // ← MODIFIÉ : ajout de $database
 
 // Slim App
 $app = AppFactory::create();
@@ -117,7 +117,7 @@ if ($basePath !== '') {
 // Route d'accueil
 $app->get('/', function ($request, $response) {
     $response->getBody()->write(json_encode([
-        'message' => 'File Vault API - Jours 1 & 2',
+        'message' => 'File Vault API - Jours 1, 2, 3 & 4',
         'endpoints' => [
             'POST /auth/register',
             'POST /auth/login',
@@ -130,6 +130,14 @@ $app->get('/', function ($request, $response) {
             'GET /files/{id}/download (auth)',
             'DELETE /files/{id} (auth)',
             'GET /stats (auth)',
+            'POST /shares (auth) - JOUR 3',
+            'GET /shares (auth) - JOUR 3',
+            'POST /shares/{id}/revoke (auth) - JOUR 3',
+            'GET /s/{token} - JOUR 3',
+            'POST /s/{token}/download - JOUR 3',
+            'POST /files/{id}/versions (auth) - JOUR 4',
+            'GET /files/{id}/versions (auth) - JOUR 4',
+            'GET /files/{id}/versions/{version}/download (auth) - JOUR 4',
         ]
     ], JSON_PRETTY_PRINT));
     return $response->withHeader('Content-Type', 'application/json');
@@ -163,8 +171,6 @@ $errorMiddleware = $app->addErrorMiddleware(true, true, true);
 // ROUTES JOUR 3 - Partages
 // ============================================
 
-
-
 $shareController = new ShareController($database);
 
 // Créer un partage (protégée)
@@ -180,5 +186,18 @@ $app->post('/shares/{id}/revoke', [$shareController, 'revoke'])->add($authMiddle
 $app->get('/s/{token}', [$shareController, 'getPublicMetadata']);
 $app->post('/s/{token}/download', [$shareController, 'downloadPublic']);
 $app->get('/s/{token}/download', [$shareController, 'downloadPublic']);
+
+// ============================================
+// ROUTES JOUR 4 - Versioning
+// ============================================
+
+// Upload nouvelle version
+$app->post('/files/{id}/versions', [$fileController, 'uploadVersion'])->add($authMiddleware);
+
+// Lister toutes les versions d'un fichier
+$app->get('/files/{id}/versions', [$fileController, 'listVersions'])->add($authMiddleware);
+
+// Télécharger une version spécifique
+$app->get('/files/{id}/versions/{version}/download', [$fileController, 'downloadVersion'])->add($authMiddleware);
 
 $app->run();
