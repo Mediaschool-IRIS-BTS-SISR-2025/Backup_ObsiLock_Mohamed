@@ -129,7 +129,7 @@ class ShareController
     }
 
     /**
-     * GET /shares - Lister mes partages
+     * GET /shares - Lister mes partages avec pagination
      */
     public function list(Request $request, Response $response): Response
     {
@@ -137,11 +137,14 @@ class ShareController
         $userId = $user['user_id'];
         $params = $request->getQueryParams();
         
-        $limit = isset($params['limit']) ? (int)$params['limit'] : 50;
-        $offset = isset($params['offset']) ? (int)$params['offset'] : 0;
+        // Pagination
+        $page = isset($params['page']) ? max(1, (int)$params['page']) : 1;
+        $perPage = isset($params['per_page']) ? min(100, max(1, (int)$params['per_page'])) : 20;
+        $offset = ($page - 1) * $perPage;
 
-        $shares = $this->shareModel->getByUser($userId, $limit, $offset);
+        $shares = $this->shareModel->getByUser($userId, $perPage, $offset);
         $total = $this->shareModel->countByUser($userId);
+        $totalPages = ceil($total / $perPage);
 
         // Enrichir avec les statistiques
         foreach ($shares as &$share) {
@@ -153,10 +156,15 @@ class ShareController
         }
 
         $response->getBody()->write(json_encode([
-            'shares' => $shares,
-            'total' => $total,
-            'limit' => $limit,
-            'offset' => $offset
+            'data' => $shares,
+            'pagination' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total' => $total,
+                'total_pages' => $totalPages,
+                'has_next' => $page < $totalPages,
+                'has_prev' => $page > 1
+            ]
         ]));
 
         return $response->withHeader('Content-Type', 'application/json');

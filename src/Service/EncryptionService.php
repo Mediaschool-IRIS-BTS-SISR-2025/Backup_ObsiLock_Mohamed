@@ -2,245 +2,189 @@
 
 namespace App\Service;
 
-/**
- * Service de chiffrement AES-256-GCM avec libsodium
- * 
- * Chiffre et déchiffre les fichiers uploadés pour garantir
- * la confidentialité au repos.
- * 
- * @package App\Service
- */
 class EncryptionService
 {
     private string $masterKey;
 
-    /**
-     * @param string $masterKey Clé maître en base64 (32 octets)
-     */
-    public function __construct(string $masterKey)
+    public function __construct()
     {
-        // Décoder la clé maître depuis base64
-        $this->masterKey = base64_decode($masterKey);
+        $key = getenv('ENCRYPTION_KEY');
+        if (!$key) {
+            throw new \RuntimeException('ENCRYPTION_KEY non définie dans .env');
+        }
+        $this->masterKey = base64_decode($key);
         
         if (strlen($this->masterKey) !== SODIUM_CRYPTO_SECRETBOX_KEYBYTES) {
-            throw new \RuntimeException('Master key must be 32 bytes');
+            throw new \RuntimeException('ENCRYPTION_KEY invalide (doit être 32 octets en base64)');
         }
     }
 
     /**
-     * Chiffre un fichier en streaming avec libsodium
+     * Chiffre un fichier
      * 
-     * @param string $inputPath Chemin du fichier source
-     * @param string $outputPath Chemin du fichier chiffré
-     * @return array ['key' => string, 'nonce' => string] en base64
-     * @throws \RuntimeException
+     * @param string $inputPath Chemin fichier source
+     * @param string $outputPath Chemin fichier chiffré
+     * @return array ['key_envelope', 'nonce', 'chunk_nonce_start']
      */
     public function encryptFile(string $inputPath, string $outputPath): array
     {
-        if (!file_exists($inputPath)) {
-            throw new \RuntimeException('Input file does not exist');
-        }
-
-        // Générer une clé de contenu aléatoire (32 octets)
-        $contentKey = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+        // 1. Génération clé de contenu aléatoire
+        $contentKey = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES); // 32 octets
         
-        // Générer un nonce aléatoire (24 octets pour secretbox)
-        $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-
-        // Ouvrir les fichiers
+        // 2. Génération nonce pour chunks
+        $chunkNonceStart = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES); // 24 octets
+        $chunkNonce = $chunkNonceStart;
+        
+        // 3. Chiffrement par blocs de 8KB
         $inputHandle = fopen($inputPath, 'rb');
         $outputHandle = fopen($outputPath, 'wb');
-
+        
         if (!$inputHandle || !$outputHandle) {
-            throw new \RuntimeException('Cannot open files for encryption');
+            throw new \RuntimeException('Impossible d\'ouvrir les fichiers');
         }
-
-        // Chiffrer par blocs de 8KB
-        $chunkSize = 8192;
         
         while (!feof($inputHandle)) {
-            $chunk = fread($inputHandle, $chunkSize);
+            $chunk = fread($inputHandle, 8192);
+            if ($chunk === false) break;
             
-            if ($chunk === false) {
-                break;
-            }
+            $encryptedChunk = sodium_crypto_secretbox($chunk, $chunkNonce, $contentKey);
+            fwrite($outputHandle, $encryptedChunk);
             
-            // Chiffrer le chunk avec libsodium secretbox
-            $encrypted = sodium_crypto_secretbox($chunk, $nonce, $contentKey);
-            
-            // Écrire le chunk chiffré
-            fwrite($outputHandle, $encrypted);
-            
-            // Incrémenter le nonce pour chaque chunk (important!)
-            sodium_increment($nonce);
+            // Incrémenter nonce pour chaque chunk
+            sodium_increment($chunkNonce);
         }
-
+        
         fclose($inputHandle);
         fclose($outputHandle);
-
-        // Chiffrer la clé de contenu avec la clé maître
-        $resetNonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-        $encryptedKey = sodium_crypto_secretbox($contentKey, $resetNonce, $this->masterKey);
-
-        // Nettoyer la mémoire
+        
+        // 4. Chiffrement de la clé de contenu avec clé maître
+        $keyNonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
+        $encryptedKey = sodium_crypto_secretbox($contentKey, $keyNonce, $this->masterKey);
+        
+        // 5. Nettoyage mémoire sensible
         sodium_memzero($contentKey);
-
+        sodium_memzero($chunkNonce);
+        
         return [
             'key_envelope' => base64_encode($encryptedKey),
-            'nonce' => base64_encode($resetNonce),
-            'chunk_nonce_start' => base64_encode(random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES))
+            'nonce' => base64_encode($keyNonce),
+            'chunk_nonce_start' => base64_encode($chunkNonceStart)
         ];
     }
 
     /**
      * Déchiffre un fichier
      * 
-     * @param string $inputPath Chemin du fichier chiffré
-     * @param string $outputPath Chemin du fichier déchiffré
+     * @param string $inputPath Chemin fichier chiffré
+     * @param string $outputPath Chemin fichier déchiffré
      * @param string $keyEnvelope Clé chiffrée (base64)
-     * @param string $nonce Nonce utilisé (base64)
-     * @throws \RuntimeException
+     * @param string $keyNonce Nonce clé (base64)
+     * @param string $chunkNonceStart Nonce chunks (base64)
      */
     public function decryptFile(
         string $inputPath, 
         string $outputPath, 
         string $keyEnvelope, 
-        string $nonce
+        string $keyNonce,
+        string $chunkNonceStart
     ): void {
-        if (!file_exists($inputPath)) {
-            throw new \RuntimeException('Encrypted file does not exist');
-        }
-
-        // Déchiffrer la clé de contenu
+        // 1. Déchiffrement clé de contenu
         $encryptedKey = base64_decode($keyEnvelope);
-        $decodedNonce = base64_decode($nonce);
+        $nonce = base64_decode($keyNonce);
         
-        $contentKey = sodium_crypto_secretbox_open($encryptedKey, $decodedNonce, $this->masterKey);
-        
+        $contentKey = sodium_crypto_secretbox_open($encryptedKey, $nonce, $this->masterKey);
         if ($contentKey === false) {
-            throw new \RuntimeException('Cannot decrypt content key');
+            throw new \RuntimeException('Impossible de déchiffrer la clé');
         }
-
-        // Ouvrir les fichiers
+        
+        // 2. Déchiffrement chunks
+        $chunkNonce = base64_decode($chunkNonceStart);
         $inputHandle = fopen($inputPath, 'rb');
         $outputHandle = fopen($outputPath, 'wb');
-
-        if (!$inputHandle || !$outputHandle) {
-            sodium_memzero($contentKey);
-            throw new \RuntimeException('Cannot open files for decryption');
-        }
-
-        // Recréer le nonce initial des chunks
-        $chunkNonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
         
-        // Taille d'un chunk chiffré (8KB + overhead libsodium)
+        if (!$inputHandle || !$outputHandle) {
+            throw new \RuntimeException('Impossible d\'ouvrir les fichiers');
+        }
+        
+        // Taille chunk chiffré = taille originale + MAC (16 octets)
         $encryptedChunkSize = 8192 + SODIUM_CRYPTO_SECRETBOX_MACBYTES;
-
+        
         while (!feof($inputHandle)) {
             $encryptedChunk = fread($inputHandle, $encryptedChunkSize);
+            if ($encryptedChunk === false || $encryptedChunk === '') break;
             
-            if ($encryptedChunk === false || strlen($encryptedChunk) === 0) {
-                break;
+            $decryptedChunk = sodium_crypto_secretbox_open($encryptedChunk, $chunkNonce, $contentKey);
+            if ($decryptedChunk === false) {
+                throw new \RuntimeException('Échec déchiffrement (fichier corrompu ou clé invalide)');
             }
-
-            // Déchiffrer le chunk
-            $decrypted = sodium_crypto_secretbox_open($encryptedChunk, $chunkNonce, $contentKey);
             
-            if ($decrypted === false) {
-                fclose($inputHandle);
-                fclose($outputHandle);
-                sodium_memzero($contentKey);
-                throw new \RuntimeException('Decryption failed');
-            }
-
-            fwrite($outputHandle, $decrypted);
-            
-            // Incrémenter le nonce
+            fwrite($outputHandle, $decryptedChunk);
             sodium_increment($chunkNonce);
         }
-
+        
         fclose($inputHandle);
         fclose($outputHandle);
         
-        // Nettoyer la mémoire
+        // Nettoyage
         sodium_memzero($contentKey);
+        sodium_memzero($chunkNonce);
     }
 
     /**
-     * Chiffre simplement des données en mémoire (pour petits fichiers)
-     * 
-     * @param string $data Données à chiffrer
-     * @return array ['encrypted' => string, 'key' => string, 'nonce' => string]
+     * Chiffre des données en mémoire
      */
     public function encryptData(string $data): array
     {
-        $contentKey = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
+        $key = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
         $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
         
-        $encrypted = sodium_crypto_secretbox($data, $nonce, $contentKey);
+        $encrypted = sodium_crypto_secretbox($data, $nonce, $key);
         
-        // Chiffrer la clé avec la clé maître
+        // Chiffrer la clé avec clé maître
         $keyNonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);
-        $encryptedKey = sodium_crypto_secretbox($contentKey, $keyNonce, $this->masterKey);
+        $encryptedKey = sodium_crypto_secretbox($key, $keyNonce, $this->masterKey);
         
-        sodium_memzero($contentKey);
-
+        sodium_memzero($key);
+        
         return [
-            'encrypted' => base64_encode($encrypted),
-            'key_envelope' => base64_encode($encryptedKey),
+            'data' => base64_encode($encrypted),
             'nonce' => base64_encode($nonce),
+            'key_envelope' => base64_encode($encryptedKey),
             'key_nonce' => base64_encode($keyNonce)
         ];
     }
 
     /**
-     * Déchiffre des données simples
-     * 
-     * @param string $encrypted Données chiffrées (base64)
-     * @param string $keyEnvelope Clé chiffrée (base64)
-     * @param string $nonce Nonce (base64)
-     * @param string $keyNonce Nonce de la clé (base64)
-     * @return string Données déchiffrées
+     * Déchiffre des données en mémoire
      */
-    public function decryptData(
-        string $encrypted, 
-        string $keyEnvelope, 
-        string $nonce,
-        string $keyNonce
-    ): string {
-        // Déchiffrer la clé de contenu
+    public function decryptData(string $encrypted, string $keyEnvelope, string $nonce, string $keyNonce): string
+    {
         $encryptedKey = base64_decode($keyEnvelope);
-        $decodedKeyNonce = base64_decode($keyNonce);
+        $keyNonceDecoded = base64_decode($keyNonce);
         
-        $contentKey = sodium_crypto_secretbox_open($encryptedKey, $decodedKeyNonce, $this->masterKey);
-        
-        if ($contentKey === false) {
-            throw new \RuntimeException('Cannot decrypt content key');
+        $key = sodium_crypto_secretbox_open($encryptedKey, $keyNonceDecoded, $this->masterKey);
+        if ($key === false) {
+            throw new \RuntimeException('Impossible de déchiffrer la clé');
         }
-
-        // Déchiffrer les données
-        $encryptedData = base64_decode($encrypted);
-        $decodedNonce = base64_decode($nonce);
         
-        $decrypted = sodium_crypto_secretbox_open($encryptedData, $decodedNonce, $contentKey);
+        $nonceDecoded = base64_decode($nonce);
+        $encryptedDecoded = base64_decode($encrypted);
         
-        sodium_memzero($contentKey);
-        
+        $decrypted = sodium_crypto_secretbox_open($encryptedDecoded, $nonceDecoded, $key);
         if ($decrypted === false) {
-            throw new \RuntimeException('Decryption failed');
+            throw new \RuntimeException('Impossible de déchiffrer les données');
         }
-
+        
+        sodium_memzero($key);
+        
         return $decrypted;
     }
 
     /**
-     * Génère une clé maître sécurisée (à faire UNE SEULE FOIS)
-     * 
-     * @return string Clé en base64
+     * Génère une clé maître aléatoire (à mettre dans .env)
      */
     public static function generateMasterKey(): string
     {
-        $key = random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES);
-        return base64_encode($key);
+        return base64_encode(random_bytes(SODIUM_CRYPTO_SECRETBOX_KEYBYTES));
     }
 }

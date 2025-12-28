@@ -43,12 +43,21 @@ $fileRepo = new FileRepository($database);
 // Controllers
 $authController = new AuthController($userRepo, $jwtSecret);
 $folderController = new FolderController($folderRepo);
-$fileController = new FileController($fileRepo, $userRepo, $uploadDir, $database); // ← MODIFIÉ : ajout de $database
+$fileController = new FileController($fileRepo, $userRepo, $uploadDir, $database);
+$shareController = new ShareController($database);
 
 // Slim App
 $app = AppFactory::create();
 $app->addBodyParsingMiddleware();
 $app->addRoutingMiddleware();
+
+// ========== JOUR 5 - MIDDLEWARES SÉCURITÉ ==========
+// Headers de sécurité HTTP
+$app->add(new \App\Middleware\SecurityHeadersMiddleware());
+
+// Rate limiting (100 requêtes par heure)
+$app->add(new \App\Middleware\RateLimitMiddleware(100, 3600));
+// ==================================================
 
 // Middleware CORS simple
 $app->add(function ($request, $handler) {
@@ -117,7 +126,13 @@ if ($basePath !== '') {
 // Route d'accueil
 $app->get('/', function ($request, $response) {
     $response->getBody()->write(json_encode([
-        'message' => 'File Vault API - Jours 1, 2, 3 & 4',
+        'message' => 'File Vault API - Jours 1-5',
+        'version' => '1.0.0',
+        'security' => [
+            'jwt_auth' => true,
+            'rate_limiting' => '100 req/hour',
+            'headers' => 'enabled'
+        ],
         'endpoints' => [
             'POST /auth/register',
             'POST /auth/login',
@@ -129,15 +144,16 @@ $app->get('/', function ($request, $response) {
             'GET /files/{id} (auth)',
             'GET /files/{id}/download (auth)',
             'DELETE /files/{id} (auth)',
+            'GET /me/quota (auth)',
             'GET /stats (auth)',
-            'POST /shares (auth) - JOUR 3',
-            'GET /shares (auth) - JOUR 3',
-            'POST /shares/{id}/revoke (auth) - JOUR 3',
-            'GET /s/{token} - JOUR 3',
-            'POST /s/{token}/download - JOUR 3',
-            'POST /files/{id}/versions (auth) - JOUR 4',
-            'GET /files/{id}/versions (auth) - JOUR 4',
-            'GET /files/{id}/versions/{version}/download (auth) - JOUR 4',
+            'POST /shares (auth)',
+            'GET /shares (auth)',
+            'POST /shares/{id}/revoke (auth)',
+            'GET /s/{token}',
+            'POST /s/{token}/download',
+            'POST /files/{id}/versions (auth)',
+            'GET /files/{id}/versions (auth)',
+            'GET /files/{id}/versions/{version}/download (auth)',
         ]
     ], JSON_PRETTY_PRINT));
     return $response->withHeader('Content-Type', 'application/json');
@@ -165,13 +181,9 @@ $app->get('/me/quota', [$fileController, 'quota'])->add($authMiddleware);
 // Stats (protégée)
 $app->get('/stats', [$fileController, 'stats'])->add($authMiddleware);
 
-$errorMiddleware = $app->addErrorMiddleware(true, true, true);
-
 // ============================================
 // ROUTES JOUR 3 - Partages
 // ============================================
-
-$shareController = new ShareController($database);
 
 // Créer un partage (protégée)
 $app->post('/shares', [$shareController, 'create'])->add($authMiddleware);
@@ -200,4 +212,8 @@ $app->get('/files/{id}/versions', [$fileController, 'listVersions'])->add($authM
 // Télécharger une version spécifique
 $app->get('/files/{id}/versions/{version}/download', [$fileController, 'downloadVersion'])->add($authMiddleware);
 
+// Error Middleware
+$errorMiddleware = $app->addErrorMiddleware(true, true, true);
+
+// Run
 $app->run();

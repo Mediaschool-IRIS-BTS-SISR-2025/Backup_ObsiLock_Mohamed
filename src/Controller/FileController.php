@@ -13,106 +13,210 @@ class FileController
     private UserRepository $users;
     private FileVersion $versions;
     private string $uploadDir;
+    private $db;
 
     public function __construct(FileRepository $files, UserRepository $users, string $uploadDir, $database = null)
     {
         $this->files = $files;
         $this->users = $users;
         $this->uploadDir = $uploadDir;
-        
+        $this->db = $database;
+
         // Initialiser FileVersion si database est fourni
         if ($database) {
             $this->versions = new FileVersion($database);
         }
     }
 
-    // GET /files
+    // GET /files - Liste avec pagination
     public function list(Request $request, Response $response): Response
     {
         $user = $request->getAttribute('user');
-        $data = $this->files->listByUser($user['user_id']);
-
-        $response->getBody()->write(json_encode($data));
+        $params = $request->getQueryParams();
+        
+        // Paramètres de pagination
+        $page = isset($params['page']) ? max(1, (int)$params['page']) : 1;
+        $perPage = isset($params['per_page']) ? min(100, max(1, (int)$params['per_page'])) : 20;
+        $offset = ($page - 1) * $perPage;
+        
+        // Filtres optionnels
+        $folderId = isset($params['folder_id']) ? (int)$params['folder_id'] : null;
+        
+        // Construire la requête
+        $where = ['user_id' => $user['user_id']];
+        if ($folderId !== null) {
+            $where['folder_id'] = $folderId;
+        }
+        
+        // Récupérer les fichiers avec limite
+        $files = $this->db->select('files', '*', array_merge($where, [
+            'ORDER' => ['uploaded_at' => 'DESC'],
+            'LIMIT' => [$offset, $perPage]
+        ]));
+        
+        // Compter le total
+        $total = $this->db->count('files', $where);
+        
+        // Calculer le nombre de pages
+        $totalPages = ceil($total / $perPage);
+        
+        $response->getBody()->write(json_encode([
+            'data' => $files,
+            'pagination' => [
+                'page' => $page,
+                'per_page' => $perPage,
+                'total' => $total,
+                'total_pages' => $totalPages,
+                'has_next' => $page < $totalPages,
+                'has_prev' => $page > 1
+            ]
+        ]));
+        
         return $response->withHeader('Content-Type', 'application/json');
     }
-
+    
     // POST /files (upload)
     public function upload(Request $request, Response $response): Response
-    {
-        $user = $request->getAttribute('user');
-        $uploadedFiles = $request->getUploadedFiles();
-        $params = $request->getParsedBody(); // ← AJOUTÉ : Récupérer les paramètres POST
-
-        if (!isset($uploadedFiles['file'])) {
-            $response->getBody()->write(json_encode(['error' => 'Aucun fichier']));
-            return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
-        }
-
-        $file = $uploadedFiles['file'];
-
-        if ($file->getError() !== UPLOAD_ERR_OK) {
-            $response->getBody()->write(json_encode(['error' => 'Erreur upload']));
-            return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
-        }
-
-        $size = $file->getSize();
-        $userInfo = $this->users->find($user['user_id']);
-
-        // Vérifier quota
-        if (($userInfo['quota_used'] + $size) > $userInfo['quota_total']) {
-            $response->getBody()->write(json_encode(['error' => 'Quota dépassé']));
-            return $response->withHeader('Content-Type', 'application/json')->withStatus(413);
-        }
-
-        $originalName = $file->getClientFilename();
-        $mimeType = $file->getClientMediaType();
-        $storedName = uniqid('f_', true) . '_' . $originalName;
-
-        // Sauvegarder le fichier
-        $targetPath = $this->uploadDir . DIRECTORY_SEPARATOR . $storedName;
-        $file->moveTo($targetPath);
-
-        // Calculer checksum
-        $checksum = hash_file('sha256', $targetPath);
-
-        // ← AJOUTÉ : Récupérer folder_id depuis les paramètres (peut être null)
+{
+    $user = $request->getAttribute('user');
+    $uploadedFiles = $request->getUploadedFiles();
+    $params = $request->getParsedBody();
+    
+    // Validation fichier
+    if (!isset($uploadedFiles['file'])) {
+        $response->getBody()->write(json_encode(['error' => 'Aucun fichier']));
+        return $response->withStatus(400)->withHeader('Content-Type', 'application/json');
+    }
+    
+    $file = $uploadedFiles['file'];
+    
+    if ($file->getError() !== UPLOAD_ERR_OK) {
+        $response->getBody()->write(json_encode(['error' => 'Erreur upload']));
+        return $response->withStatus(400)->withHeader('Content-Type', 'application/json');
+    }
+    
+    $size = $file->getSize();
+    
+    // Vérification quota
+    $userInfo = $this->users->find($user['user_id']);
+    if (($userInfo['quota_used'] + $size) > $userInfo['quota_total']) {
+        $response->getBody()->write(json_encode(['error' => 'Quota dépassé']));
+        return $response->withStatus(413)->withHeader('Content-Type', 'application/json');
+    }
+    
+    // Génération nom unique
+    $originalName = $file->getClientFilename();
+    $storedName = uniqid('f_', true) . '_' . time();
+    
+    // Organisation par user_id/YYYY/MM/
+    $uploadPath = sprintf(
+        '%s/%d/%s/%s',
+        $this->uploadDir,
+        $user['user_id'],
+        date('Y'),
+        date('m')
+    );
+    
+    // Créer dossiers si nécessaire
+    if (!is_dir($uploadPath)) {
+        mkdir($uploadPath, 0777, true);
+    }
+    
+    $tempPath = $uploadPath . '/' . $storedName . '.tmp';
+    $encryptedPath = $uploadPath . '/' . $storedName . '.enc';
+    
+    try {
+        // 1. Sauvegarde temporaire
+        $file->moveTo($tempPath);
+        
+        // 2. Calcul checksum AVANT chiffrement
+        $checksum = hash_file('sha256', $tempPath);
+        
+        // 3. Chiffrement
+        $encryption = new \App\Service\EncryptionService();
+        $encryptionData = $encryption->encryptFile($tempPath, $encryptedPath);
+        
+        // 4. Suppression fichier temporaire
+        unlink($tempPath);
+        
+        // 5. Récupération folder_id
         $folderId = isset($params['folder_id']) && $params['folder_id'] !== '' 
             ? (int)$params['folder_id'] 
             : null;
-
-        // Créer l'entrée en BDD
+        
+        // 6. Insertion fichier
         $fileId = $this->files->create([
             'user_id' => $user['user_id'],
-            'folder_id' => $folderId, // ← CORRIGÉ : Utilise le folder_id récupéré
+            'folder_id' => $folderId,
             'filename' => $originalName,
-            'stored_name' => $storedName,
+            'stored_name' => $storedName . '.enc',
             'size' => $size,
-            'mime_type' => $mimeType,
+            'mime_type' => $file->getClientMediaType(),
             'checksum' => $checksum,
-            // current_version sera automatiquement = 1 (DEFAULT)
+            'current_version' => 1
         ]);
-
-        // Créer la version 1 si le système de versioning est activé
-        if (isset($this->versions)) {
-            $this->versions->create($fileId, [
-                'stored_name' => $storedName,
-                'size' => $size,
-                'checksum' => $checksum,
-                'mime_type' => $mimeType
-            ]);
-        }
-
-        // Mettre à jour le quota
+        
+        // 7. Création version 1 avec métadonnées chiffrement
+        $this->db->insert('file_versions', [
+            'file_id' => $fileId,
+            'version' => 1,
+            'stored_name' => $storedName . '.enc',
+            'size' => $size,
+            'checksum' => $checksum,
+            'mime_type' => $file->getClientMediaType(),
+            'nonce' => $encryptionData['chunk_nonce_start'],
+            'key_envelope' => $encryptionData['key_envelope'],
+            'key_nonce' => $encryptionData['nonce']
+        ]);
+        
+        // 8. Mise à jour quota
         $this->users->updateQuota($user['user_id'], $userInfo['quota_used'] + $size);
-
+        
+        // 9. Journalisation (upload_logs)
+        $this->db->insert('upload_logs', [
+            'user_id' => $user['user_id'],
+            'file_id' => $fileId,
+            'filename' => $originalName,
+            'size' => $size,
+            'mime_type' => $file->getClientMediaType(),
+            'checksum' => $checksum,
+            'ip_address' => $_SERVER['REMOTE_ADDR'] ?? null,
+            'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            'success' => true
+        ]);
+        
         $response->getBody()->write(json_encode([
-            'message' => 'Fichier uploadé',
+            'message' => 'Fichier uploadé et chiffré avec succès',
             'id' => $fileId,
             'version' => 1,
-            'folder_id' => $folderId // ← AJOUTÉ : Confirmer le folder_id
+            'folder_id' => $folderId,
+            'encrypted' => true
         ]));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(201);
+        
+        return $response->withStatus(201)->withHeader('Content-Type', 'application/json');
+        
+    } catch (\Exception $e) {
+        // Journalisation erreur
+        $this->db->insert('upload_logs', [
+            'user_id' => $user['user_id'],
+            'file_id' => null,
+            'filename' => $originalName,
+            'size' => $size,
+            'mime_type' => $file->getClientMediaType(),
+            'ip_address' => $_SERVER['REMOTE_ADDR'] ?? null,
+            'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? null,
+            'success' => false,
+            'error_message' => $e->getMessage()
+        ]);
+        
+        // Nettoyage
+        if (file_exists($tempPath)) unlink($tempPath);
+        if (file_exists($encryptedPath)) unlink($encryptedPath);
+        
+        $response->getBody()->write(json_encode(['error' => 'Erreur: ' . $e->getMessage()]));
+        return $response->withStatus(500)->withHeader('Content-Type', 'application/json');
     }
+}
 
     // GET /files/{id}
     public function show(Request $request, Response $response, array $args): Response
@@ -144,31 +248,76 @@ class FileController
 
     // GET /files/{id}/download
     public function download(Request $request, Response $response, array $args): Response
-    {
-        $user = $request->getAttribute('user');
-        $fileId = (int)$args['id'];
-        $file = $this->files->find($fileId);
-
-        if (!$file || $file['user_id'] !== $user['user_id']) {
-            $response->getBody()->write('Fichier introuvable');
-            return $response->withStatus(404);
-        }
-
-        $path = $this->uploadDir . DIRECTORY_SEPARATOR . $file['stored_name'];
-
-        if (!file_exists($path)) {
-            $response->getBody()->write('Fichier manquant');
-            return $response->withStatus(500);
-        }
-
-        $stream = fopen($path, 'rb');
+{
+    $user = $request->getAttribute('user');
+    $fileId = (int)$args['id'];
+    
+    $file = $this->files->find($fileId);
+    
+    if (!$file || $file['user_id'] !== $user['user_id']) {
+        return $response->withStatus(404);
+    }
+    
+    // Récupérer la version actuelle
+    $version = $this->db->get('file_versions', '*', [
+        'file_id' => $fileId,
+        'version' => $file['current_version']
+    ]);
+    
+    if (!$version) {
+        return $response->withStatus(404);
+    }
+    
+    // Reconstruction chemin
+    $storedNameWithoutExt = str_replace('.enc', '', $version['stored_name']);
+    $parts = explode('_', $storedNameWithoutExt);
+    $timestamp = end($parts);
+    $date = date('Y/m', $timestamp);
+    
+    $encryptedPath = sprintf(
+        '%s/%d/%s/%s',
+        $this->uploadDir,
+        $user['user_id'],
+        $date,
+        $version['stored_name']
+    );
+    
+    if (!file_exists($encryptedPath)) {
+        $response->getBody()->write(json_encode(['error' => 'Fichier introuvable']));
+        return $response->withStatus(404)->withHeader('Content-Type', 'application/json');
+    }
+    
+    try {
+        // Déchiffrement
+        $tempPath = sys_get_temp_dir() . '/' . uniqid('dec_', true);
+        
+        $encryption = new \App\Service\EncryptionService();
+        $encryption->decryptFile(
+            $encryptedPath,
+            $tempPath,
+            $version['key_envelope'],
+            $version['key_nonce'],
+            $version['nonce']
+        );
+        
+        // Streaming du fichier déchiffré
+        $stream = fopen($tempPath, 'rb');
         $response->getBody()->write(stream_get_contents($stream));
         fclose($stream);
-
+        
+        // Nettoyage
+        unlink($tempPath);
+        
         return $response
-            ->withHeader('Content-Type', $file['mime_type'])
-            ->withHeader('Content-Disposition', 'attachment; filename="' . $file['filename'] . '"');
+            ->withHeader('Content-Type', $file['mime_type'] ?? 'application/octet-stream')
+            ->withHeader('Content-Disposition', 'attachment; filename="' . $file['filename'] . '"')
+            ->withHeader('Content-Length', (string)$file['size']);
+            
+    } catch (\Exception $e) {
+        $response->getBody()->write(json_encode(['error' => 'Erreur déchiffrement: ' . $e->getMessage()]));
+        return $response->withStatus(500)->withHeader('Content-Type', 'application/json');
     }
+}
 
     // DELETE /files/{id}
     public function delete(Request $request, Response $response, array $args): Response
