@@ -15,5 +15,8 @@
         "slim/slim": "4.12",
         "slim/psr7": "1.8",
         "catfan/medoo": "2.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.0"
     }
 }
